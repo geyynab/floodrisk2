@@ -23,6 +23,12 @@ namespace floodrisk2
         private readonly Dictionary<ISensorModel, Label> statusLabelMap =
             new Dictionary<ISensorModel, Label>();
 
+        // === HISTORY BUFFER (streaming) ===
+        private readonly Dictionary<ISensorModel, List<double>> signalHistory =
+            new Dictionary<ISensorModel, List<double>>();
+        private readonly Dictionary<ISensorModel, List<double>> timeHistory =
+            new Dictionary<ISensorModel, List<double>>();
+
         // layout panels
         private Panel leftPanel;
         private Panel centerPanel;
@@ -30,8 +36,8 @@ namespace floodrisk2
 
         // timer + settings
         private Timer timer;
-        private double sampleRate = 2000.0; // global sample rate for combined signal
-        private double windowSec = 10.0;     // display window seconds
+        private double sampleRate = 2000.0;
+        private double windowSec = 10.0;
 
         // continuous time
         private double globalTime = 0.0;
@@ -44,9 +50,14 @@ namespace floodrisk2
         private Button btnStart;
         private Button btnStop;
 
+        // === shading settings ===
+        private readonly Color sStableFill = Color.FromArgb(40, Color.LightGreen);
+        private readonly Color zStableFill = Color.FromArgb(40, Color.LightGreen);
+        private readonly Pen axisPen = new Pen(Color.FromArgb(180, Color.Black), 1f);
+
         public Form1()
         {
-            //InitializeComponent();  
+            //InitializeComponent();
 
             Text = "Flood Risk Signal Dashboard - Simulation";
             Width = 1400;
@@ -58,9 +69,10 @@ namespace floodrisk2
             BuildChartsAndParams();
             BuildRightColumn();
 
+            InitHistoryBuffers();
+
             timer = new Timer { Interval = 200 };
             timer.Tick += Timer_Tick;
-            // timer.Start();  // sekarang pakai tombol Start
         }
 
         #region Init + Layout
@@ -88,7 +100,7 @@ namespace floodrisk2
             ph.P.NoiseStd = 0.01;
             ph.P.Gain = 1.0;
             ph.P.Offset = 0.0;
-            ph.P.Tau = 5.0; // respon pH ~5 s
+            ph.P.Tau = 5.0;
 
             var tmp = new DS18B20();
             tmp.P.TrueTemp = 26.0;
@@ -100,6 +112,20 @@ namespace floodrisk2
             sensors.Add(yl);
             sensors.Add(ph);
             sensors.Add(tmp);
+        }
+
+        private void InitHistoryBuffers()
+        {
+            signalHistory.Clear();
+            timeHistory.Clear();
+
+            foreach (var s in sensors)
+            {
+                signalHistory[s] = new List<double>(8000);
+                timeHistory[s] = new List<double>(8000);
+            }
+
+            globalTime = 0.0;
         }
 
         private void BuildLayout()
@@ -145,7 +171,15 @@ namespace floodrisk2
             btnStart = new Button { Text = "Start", Width = 70 };
             btnStop = new Button { Text = "Stop", Width = 70 };
 
-            btnStart.Click += (s, e) => timer?.Start();
+            btnStart.Click += (s, e) =>
+            {
+                if (!timer.Enabled)
+                {
+                    InitHistoryBuffers();
+                    timer.Start();
+                }
+            };
+
             btnStop.Click += (s, e) => timer?.Stop();
 
             ctlPanel.Controls.Add(btnStart);
@@ -195,7 +229,6 @@ namespace floodrisk2
                 var chartFreq = NewChart($"{s.Name} (Frequency Domain)");
                 chartMap[s] = (chartTime, chartFreq);
 
-                // === label status di bawah chart time-domain ===
                 var statusLabel = new Label
                 {
                     Text = "Status: -",
@@ -207,16 +240,11 @@ namespace floodrisk2
                     Padding = new Padding(4, 0, 0, 0)
                 };
 
-                // panel yang berisi chart time + label status
-                var timePanel = new Panel
-                {
-                    Dock = DockStyle.Fill
-                };
+                var timePanel = new Panel { Dock = DockStyle.Fill };
                 chartTime.Dock = DockStyle.Fill;
                 timePanel.Controls.Add(chartTime);
                 timePanel.Controls.Add(statusLabel);
 
-                // simpan label ke dictionary
                 statusLabelMap[s] = statusLabel;
 
                 centerLayout.RowCount += 1;
@@ -242,7 +270,7 @@ namespace floodrisk2
             else if (s is SEN0161) numParams = 3;
             else if (s is DS18B20) numParams = 2;
 
-            int panelHeight = 30 + (numParams * 55) + 40; // extra untuk rumus
+            int panelHeight = 30 + (numParams * 55) + 40;
 
             var panel = new Panel
             {
@@ -305,79 +333,85 @@ namespace floodrisk2
                 row++;
             };
 
+            // IMPORTANT: slider scroll hanya update parameter + label (TANPA redraw)
             if (s is JSNSR04T jsn)
             {
                 var trD = new TrackBar { Minimum = 1, Maximum = 600, Value = (int)jsn.P.Distance_cm, TickFrequency = 50 };
                 var valD = new Label { Text = jsn.P.Distance_cm.ToString("0") };
-                trD.Scroll += (o, e) => { jsn.P.Distance_cm = trD.Value; valD.Text = trD.Value.ToString(); RefreshAllCharts(); };
+                trD.Scroll += (o, e) => { jsn.P.Distance_cm = trD.Value; valD.Text = trD.Value.ToString(); };
                 AddParamRow("Distance (cm):", trD, valD);
 
                 var trAlpha = new TrackBar { Minimum = 0, Maximum = 500, Value = (int)(jsn.P.Alpha * 100) };
                 var valAlpha = new Label { Text = jsn.P.Alpha.ToString("0.00") };
-                trAlpha.Scroll += (o, e) => { jsn.P.Alpha = trAlpha.Value / 100.0; valAlpha.Text = jsn.P.Alpha.ToString("0.00"); RefreshAllCharts(); };
+                trAlpha.Scroll += (o, e) => { jsn.P.Alpha = trAlpha.Value / 100.0; valAlpha.Text = jsn.P.Alpha.ToString("0.00"); };
                 AddParamRow("Attenuation (α):", trAlpha, valAlpha);
 
                 var trF0 = new TrackBar { Minimum = 20000, Maximum = 60000, Value = (int)jsn.P.F0, TickFrequency = 5000 };
                 var valF0 = new Label { Text = jsn.P.F0.ToString("0") };
-                trF0.Scroll += (o, e) => { jsn.P.F0 = trF0.Value; valF0.Text = trF0.Value.ToString(); RefreshAllCharts(); };
+                trF0.Scroll += (o, e) => { jsn.P.F0 = trF0.Value; valF0.Text = trF0.Value.ToString(); };
                 AddParamRow("F0 (Hz):", trF0, valF0);
 
                 var trNoise = new TrackBar { Minimum = 0, Maximum = 500, Value = (int)(jsn.P.NoiseStd * 100) };
                 var valNoise = new Label { Text = jsn.P.NoiseStd.ToString("0.00") };
-                trNoise.Scroll += (o, e) => { jsn.P.NoiseStd = trNoise.Value / 100.0; valNoise.Text = jsn.P.NoiseStd.ToString("0.00"); RefreshAllCharts(); };
+                trNoise.Scroll += (o, e) => { jsn.P.NoiseStd = trNoise.Value / 100.0; valNoise.Text = jsn.P.NoiseStd.ToString("0.00"); };
                 AddParamRow("Noise Std:", trNoise, valNoise);
             }
             else if (s is YFS201 yf)
             {
                 var trQ = new TrackBar { Minimum = 1, Maximum = 30, Value = (int)yf.P.Flow_Lpm };
                 var valQ = new Label { Text = yf.P.Flow_Lpm.ToString("0") };
-                trQ.Scroll += (o, e) => { yf.P.Flow_Lpm = trQ.Value; valQ.Text = trQ.Value.ToString(); RefreshAllCharts(); };
+                trQ.Scroll += (o, e) => { yf.P.Flow_Lpm = trQ.Value; valQ.Text = trQ.Value.ToString(); };
                 AddParamRow("Flow (L/min) Q(t):", trQ, valQ);
 
                 var trK = new TrackBar { Minimum = 10, Maximum = 150, Value = (int)(yf.P.K * 10) };
                 var valK = new Label { Text = yf.P.K.ToString("0.0") };
-                trK.Scroll += (o, e) => { yf.P.K = trK.Value / 10.0; valK.Text = yf.P.K.ToString("0.0"); RefreshAllCharts(); };
+                trK.Scroll += (o, e) => { yf.P.K = trK.Value / 10.0; valK.Text = yf.P.K.ToString("0.0"); };
                 AddParamRow("K-Factor (k):", trK, valK);
             }
             else if (s is YL83 yl)
             {
                 var trW = new TrackBar { Minimum = 0, Maximum = 100, Value = (int)(yl.P.Wetness * 100) };
                 var valW = new Label { Text = yl.P.Wetness.ToString("0.00") };
-                trW.Scroll += (o, e) => { yl.P.Wetness = trW.Value / 100.0; valW.Text = yl.P.Wetness.ToString("0.00"); RefreshAllCharts(); };
+                trW.Scroll += (o, e) => { yl.P.Wetness = trW.Value / 100.0; valW.Text = yl.P.Wetness.ToString("0.00"); };
                 AddParamRow("Wetness (W(t)):", trW, valW);
 
                 var trAlpha = new TrackBar { Minimum = 0, Maximum = 100, Value = (int)(yl.P.Alpha * 100) };
                 var valAlpha = new Label { Text = yl.P.Alpha.ToString("0.00") };
-                trAlpha.Scroll += (o, e) => { yl.P.Alpha = trAlpha.Value / 100.0; valAlpha.Text = yl.P.Alpha.ToString("0.00"); RefreshAllCharts(); };
+                trAlpha.Scroll += (o, e) => { yl.P.Alpha = trAlpha.Value / 100.0; valAlpha.Text = yl.P.Alpha.ToString("0.00"); };
                 AddParamRow("Filtering (α):", trAlpha, valAlpha);
             }
             else if (s is SEN0161 ph)
             {
-                var trV = new TrackBar { Minimum = 0, Maximum = 500, Value = (int)(ph.P.Vout * 100) };
+                var trV = new TrackBar
+                {
+                    Minimum = 0,
+                    Maximum = 300,
+                    Value = (int)(Math.Max(0.0, Math.Min(3.0, ph.P.Vout)) * 100)
+                };
                 var valV = new Label { Text = ph.P.Vout.ToString("0.00") };
-                trV.Scroll += (o, e) => { ph.P.Vout = trV.Value / 100.0; valV.Text = ph.P.Vout.ToString("0.00"); RefreshAllCharts(); };
-                AddParamRow("Vout (V):", trV, valV);
+                trV.Scroll += (o, e) => { ph.P.Vout = trV.Value / 100.0; valV.Text = ph.P.Vout.ToString("0.00"); };
+                AddParamRow("Vout (0–3V):", trV, valV);
 
                 var trGain = new TrackBar { Minimum = 10, Maximum = 500, Value = (int)(ph.P.Gain * 100) };
                 var valGain = new Label { Text = ph.P.Gain.ToString("0.00") };
-                trGain.Scroll += (o, e) => { ph.P.Gain = trGain.Value / 100.0; valGain.Text = ph.P.Gain.ToString("0.00"); RefreshAllCharts(); };
+                trGain.Scroll += (o, e) => { ph.P.Gain = trGain.Value / 100.0; valGain.Text = ph.P.Gain.ToString("0.00"); };
                 AddParamRow("Gain:", trGain, valGain);
 
                 var trOffset = new TrackBar { Minimum = -500, Maximum = 500, Value = (int)(ph.P.Offset * 100) };
                 var valOffset = new Label { Text = ph.P.Offset.ToString("0.00") };
-                trOffset.Scroll += (o, e) => { ph.P.Offset = trOffset.Value / 100.0; valOffset.Text = ph.P.Offset.ToString("0.00"); RefreshAllCharts(); };
+                trOffset.Scroll += (o, e) => { ph.P.Offset = trOffset.Value / 100.0; valOffset.Text = ph.P.Offset.ToString("0.00"); };
                 AddParamRow("Offset:", trOffset, valOffset);
             }
             else if (s is DS18B20 tmp)
             {
                 var trT = new TrackBar { Minimum = -55, Maximum = 125, Value = (int)tmp.P.TrueTemp };
                 var valT = new Label { Text = tmp.P.TrueTemp.ToString("0") };
-                trT.Scroll += (o, e) => { tmp.P.TrueTemp = trT.Value; valT.Text = tmp.P.TrueTemp.ToString(); RefreshAllCharts(); };
+                trT.Scroll += (o, e) => { tmp.P.TrueTemp = trT.Value; valT.Text = tmp.P.TrueTemp.ToString(); };
                 AddParamRow("True Temp (°C):", trT, valT);
 
                 var trNoise = new TrackBar { Minimum = 0, Maximum = 500, Value = (int)(tmp.P.NoiseStd * 100) };
                 var valNoise = new Label { Text = tmp.P.NoiseStd.ToString("0.00") };
-                trNoise.Scroll += (o, e) => { tmp.P.NoiseStd = trNoise.Value / 100.0; valNoise.Text = tmp.P.NoiseStd.ToString("0.00"); RefreshAllCharts(); };
+                trNoise.Scroll += (o, e) => { tmp.P.NoiseStd = trNoise.Value / 100.0; valNoise.Text = tmp.P.NoiseStd.ToString("0.00"); };
                 AddParamRow("Noise Std:", trNoise, valNoise);
             }
 
@@ -392,25 +426,15 @@ namespace floodrisk2
             };
 
             if (s is JSNSR04T)
-                lblInfo.Text =
-                    "s(t)=A e^{-αd} cos[2πf0(t-2d/c(T))] + n(t)\n" +
-                    "Fs = 100 kHz";
+                lblInfo.Text = "JSN: echo waveform + time-of-flight\nFs = 100 kHz";
             else if (s is YFS201)
-                lblInfo.Text =
-                    "f(t)=k·Q(t) + n(t)\n" +
-                    "Fs = 400 Hz";
+                lblInfo.Text = "f(t)=k·Q(t) + n(t)\nFs = 400 Hz";
             else if (s is YL83)
-                lblInfo.Text =
-                    "Vout(t)=1+2e^{-αW(t)} + n(t)\n" +
-                    "Fs = 20 Hz";
+                lblInfo.Text = "Vout(t)=1+2e^{-αW(t)} + n(t)\nFs = 20 Hz";
             else if (s is SEN0161)
-                lblInfo.Text =
-                    "τ dpH/dt + pH = pH_true(t)\n" +
-                    "Fs = 10 Hz";
+                lblInfo.Text = "τ dpH/dt + pH = pH_true(t)\nFs = 10 Hz";
             else if (s is DS18B20)
-                lblInfo.Text =
-                    "T_meas=T_true + drift·t + n(t)\n" +
-                    "Fs = 5 Hz";
+                lblInfo.Text = "T_meas updated (tCONV) + noise\nFs = 5 Hz";
 
             panel.Controls.Add(lblInfo);
 
@@ -442,6 +466,10 @@ namespace floodrisk2
             return chart;
         }
 
+        #endregion
+
+        #region Right column + S/Z charts
+
         private void BuildRightColumn()
         {
             var top = new Panel
@@ -454,7 +482,7 @@ namespace floodrisk2
             var pic3D = new PictureBox
             {
                 Dock = DockStyle.Fill,
-                Image = Properties.Resources.alat, // ganti dengan nama resource kamu
+                Image = Properties.Resources.alat,
                 SizeMode = PictureBoxSizeMode.Zoom,
                 BackColor = Color.White
             };
@@ -462,11 +490,11 @@ namespace floodrisk2
             top.Controls.Add(pic3D);
 
             var sdomPanel = new Panel { Dock = DockStyle.Top, Height = 240, BackColor = Color.White };
-            sChart = NewSPoleChart("S-domain Pole Plot");
+            sChart = NewSPoleChart("S-domain Pole-Zero Plot (Stable: Re(s) < 0)");
             sdomPanel.Controls.Add(sChart);
 
             var zdomPanel = new Panel { Dock = DockStyle.Top, Height = 240, BackColor = Color.White };
-            zChart = NewZPoleChart("Z-domain Pole-Zero Plot");
+            zChart = NewZPoleChart("Z-domain Pole-Zero Plot (Stable: |z| < 1)");
             zdomPanel.Controls.Add(zChart);
 
             rightPanel.Controls.Add(zdomPanel);
@@ -477,17 +505,22 @@ namespace floodrisk2
         private Chart NewSPoleChart(string title)
         {
             var chart = new Chart { Dock = DockStyle.Fill, BackColor = Color.WhiteSmoke };
+
             var area = new ChartArea("s");
             area.AxisX.MajorGrid.LineColor = Color.LightGray;
             area.AxisY.MajorGrid.LineColor = Color.LightGray;
+
             area.AxisX.Crossing = 0;
             area.AxisY.Crossing = 0;
+
             area.AxisX.Title = "Re(s)";
             area.AxisY.Title = "Im(s)";
+
             area.AxisX.Minimum = -6;
             area.AxisX.Maximum = 6;
             area.AxisY.Minimum = -4;
             area.AxisY.Maximum = 4;
+
             chart.ChartAreas.Add(area);
 
             var poles = new Series("Poles")
@@ -499,9 +532,19 @@ namespace floodrisk2
             };
             chart.Series.Add(poles);
 
+            var zeros = new Series("Zeros")
+            {
+                ChartType = SeriesChartType.Point,
+                MarkerStyle = MarkerStyle.Circle,
+                MarkerSize = 8,
+                Color = Color.Blue
+            };
+            chart.Series.Add(zeros);
+
             var legend = new Legend("L");
             legend.Docking = Docking.Bottom;
             chart.Legends.Add(legend);
+
             chart.Titles.Add(title);
 
             return chart;
@@ -510,15 +553,19 @@ namespace floodrisk2
         private Chart NewZPoleChart(string title)
         {
             var chart = new Chart { Dock = DockStyle.Fill, BackColor = Color.WhiteSmoke };
+
             var area = new ChartArea("z");
             area.AxisX.MajorGrid.LineColor = Color.LightGray;
             area.AxisY.MajorGrid.LineColor = Color.LightGray;
+
             area.AxisX.Crossing = 0;
             area.AxisY.Crossing = 0;
+
             area.AxisX.Minimum = -2;
             area.AxisX.Maximum = 2;
             area.AxisY.Minimum = -2;
             area.AxisY.Maximum = 2;
+
             area.AxisX.Title = "Re(z)";
             area.AxisY.Title = "Im(z)";
             chart.ChartAreas.Add(area);
@@ -543,7 +590,8 @@ namespace floodrisk2
             {
                 ChartType = SeriesChartType.Line,
                 BorderDashStyle = ChartDashStyle.Dash,
-                Color = Color.Gray
+                Color = Color.Gray,
+                BorderWidth = 2
             };
 
             chart.Series.Add(poles);
@@ -553,9 +601,10 @@ namespace floodrisk2
             var legend = new Legend("L");
             legend.Docking = Docking.Bottom;
             chart.Legends.Add(legend);
+
             chart.Titles.Add(title);
 
-            // isi unit circle
+            unit.Points.Clear();
             int N = 360;
             for (int i = 0; i <= N; i++)
             {
@@ -563,15 +612,39 @@ namespace floodrisk2
                 unit.Points.AddXY(Math.Cos(ang), Math.Sin(ang));
             }
 
+
             return chart;
+        }
+
+        
+        private RectangleF GetInnerPlotRectangle(Chart chart, ChartArea area)
+        {
+            RectangleF caRect = new RectangleF(
+                chart.ClientRectangle.Width * area.Position.X / 100f,
+                chart.ClientRectangle.Height * area.Position.Y / 100f,
+                chart.ClientRectangle.Width * area.Position.Width / 100f,
+                chart.ClientRectangle.Height * area.Position.Height / 100f
+            );
+
+            RectangleF ipRect = new RectangleF(
+                caRect.X + caRect.Width * area.InnerPlotPosition.X / 100f,
+                caRect.Y + caRect.Height * area.InnerPlotPosition.Y / 100f,
+                caRect.Width * area.InnerPlotPosition.Width / 100f,
+                caRect.Height * area.InnerPlotPosition.Height / 100f
+            );
+
+            return ipRect;
         }
 
         #endregion
 
-        #region Timer + plotting
+        #region Timer + plotting (STREAMING)
 
         private void Timer_Tick(object sender, EventArgs e)
         {
+            double dtTick = timer.Interval / 1000.0;
+            double tNew = globalTime + dtTick;
+
             double jsDisplayWindow = 0.025;
             double defaultWindow = windowSec;
 
@@ -580,58 +653,87 @@ namespace floodrisk2
                 double sr;
                 double localWindow;
 
-                if (s is JSNSR04T)
-                {
-                    sr = 100000.0;
-                    localWindow = jsDisplayWindow;
-                }
+                if (s is JSNSR04T) { sr = 100000.0; localWindow = jsDisplayWindow; }
                 else if (s is YFS201) { sr = 400; localWindow = defaultWindow; }
                 else if (s is YL83) { sr = 20; localWindow = defaultWindow; }
                 else if (s is SEN0161) { sr = 10; localWindow = defaultWindow; }
                 else if (s is DS18B20) { sr = 5; localWindow = defaultWindow; }
                 else { sr = sampleRate; localWindow = defaultWindow; }
 
-                int N = Math.Max(4, (int)(sr * localWindow));
-                double[] t = new double[N];
+                int chunkN = Math.Max(1, (int)Math.Round(sr * dtTick));
+                if (s is JSNSR04T) chunkN = Math.Min(chunkN, 2000);
 
-                double tEnd = globalTime;
-                double tStart = Math.Max(0.0, tEnd - localWindow);
+                double[] tChunk = new double[chunkN];
 
-                for (int i = 0; i < N; i++)
-                    t[i] = tStart + i / sr;
+                // chunk harus "nempel" ke waktu sekarang (tNew)
+                double tStartChunk = tNew - (chunkN / sr);
+                for (int i = 0; i < chunkN; i++)
+                    tChunk[i] = tStartChunk + i / sr;
 
-                double[] y = s.Generate(t);
+                double[] yChunk = s.Generate(tChunk);
+
+                var th = timeHistory[s];
+                var yh = signalHistory[s];
+
+                th.AddRange(tChunk);
+                yh.AddRange(yChunk);
+
+                double tCut = tNew - localWindow;
+                while (th.Count > 0 && th[0] < tCut)
+                {
+                    th.RemoveAt(0);
+                    yh.RemoveAt(0);
+                }
 
                 var (timeChart, freqChart) = chartMap[s];
-                PlotTime(timeChart, t, y);
 
-                var (freqs, mags) = FFTService.ComputeFFT(y, sr);
-                double fMax = (s is JSNSR04T) ? Math.Min(sr / 2.0, 50000.0) : sr / 2.0;
-                PlotFreq(freqChart, freqs, mags, fMax);
+                PlotTime(timeChart, th.ToArray(), yh.ToArray());
 
-                // update status sensor berdasarkan nilai terakhir sinyal
-                double currentValue = y.Length > 0 ? y[y.Length - 1] : 0.0;
+                // FFT window
+                int fftN = Math.Min(2048, yh.Count);
+                if (fftN >= 16)
+                {
+                    double[] yFft = yh.Skip(yh.Count - fftN).Take(fftN).ToArray();
+
+                    // DC removal
+                    double mean = yFft.Average();
+                    for (int i = 0; i < yFft.Length; i++) yFft[i] -= mean;
+
+                    // Hann window
+                    ApplyHann(yFft);
+
+                    var (freqs, mags) = FFTService.ComputeFFT(yFft, sr);
+                    double fMax = (s is JSNSR04T) ? Math.Min(sr / 2.0, 50000.0) : sr / 2.0;
+                    PlotFreq(freqChart, freqs, mags, fMax);
+                }
+
+                double currentValue = yh.Count > 0 ? yh[yh.Count - 1] : 0.0;
                 UpdateStatusLabel(s, currentValue);
             }
 
-            // update pole / zero diagrams
+            // domain s/z
             var sPoles = GetSystemPoles();
             var sZeros = GetSystemZeros();
 
-            DrawSPolePlot(sChart, sPoles);
+            DrawSPoleZeroPlot(sChart, sPoles, sZeros);
 
-            double Ts = 1.0; // sample time normalisasi
+            double Ts = 1.0; // normalisasi
             var zPoles = sPoles.Select(p => Complex.Exp(p * Ts)).ToList();
             var zZeros = sZeros.Select(z => Complex.Exp(z * Ts)).ToList();
-
             DrawZPoleZeroPlot(zChart, zPoles, zZeros);
 
-            globalTime += timer.Interval / 1000.0;
+            globalTime = tNew;
         }
 
-        private void RefreshAllCharts()
+        private void ApplyHann(double[] x)
         {
-            Timer_Tick(null, null);
+            int N = x.Length;
+            if (N <= 1) return;
+            for (int n = 0; n < N; n++)
+            {
+                double w = 0.5 * (1.0 - Math.Cos(2.0 * Math.PI * n / (N - 1)));
+                x[n] *= w;
+            }
         }
 
         private void PlotTime(Chart chart, double[] x, double[] y)
@@ -639,11 +741,14 @@ namespace floodrisk2
             var s = chart.Series[0];
             s.Points.Clear();
 
+            if (x == null || y == null || x.Length == 0 || y.Length == 0)
+                return;
+
             int step = Math.Max(1, x.Length / 1000);
             double t0 = x[0];
 
             for (int i = 0; i < x.Length; i += step)
-                s.Points.AddXY(x[i] - t0, y[i]); // waktu relatif
+                s.Points.AddXY(x[i] - t0, y[i]);
 
             chart.ChartAreas[0].RecalculateAxesScale();
         }
@@ -652,6 +757,9 @@ namespace floodrisk2
         {
             var s = chart.Series[0];
             s.Points.Clear();
+
+            if (freqs == null || mags == null || freqs.Length == 0 || mags.Length == 0)
+                return;
 
             int len = Math.Min(freqs.Length, mags.Length);
             int limit = len;
@@ -684,14 +792,16 @@ namespace floodrisk2
 
             if (sensor is JSNSR04T jsn)
             {
-                // Distance dari sensor ke permukaan air (cm)
                 double d = jsn.P.Distance_cm;
 
                 if (d > 50) { status = "AMAN"; color = Color.Green; }
                 else if (d >= 20) { status = "SIAGA"; color = Color.Orange; }
                 else { status = "BAHAYA"; color = Color.Red; }
 
-                lbl.Text = $"Status: {status} (d = {d:0} cm)";
+                double tEchoMs = 0.0;
+                try { tEchoMs = jsn.LastEchoTimeSec * 1000.0; } catch { }
+
+                lbl.Text = $"Status: {status} (d = {d:0} cm, t_echo = {tEchoMs:0.00} ms)";
             }
             else if (sensor is YFS201 yf)
             {
@@ -705,7 +815,6 @@ namespace floodrisk2
             }
             else if (sensor is YL83 yl)
             {
-                // anggap Wetness 0–1 dipetakan ke 0–100 mm/jam (bisa kamu refine)
                 double rain = yl.P.Wetness * 100.0;
 
                 if (rain < 10) { status = "AMAN"; color = Color.Green; }
@@ -737,7 +846,6 @@ namespace floodrisk2
             {
                 double temp = currentValue;
 
-                // versi simple: aman 0–50 °C, sisanya siaga/bahaya bisa kamu refine lagi
                 if (temp >= 0 && temp <= 50)
                 {
                     status = "AMAN"; color = Color.Green;
@@ -755,20 +863,20 @@ namespace floodrisk2
 
         #endregion
 
-        #region S/Z-domain helpers
+        #region S/Z-domain helpers (poles/zeros) + drawing
 
         private List<Complex> GetSystemPoles()
         {
-            // Normalisasi supaya range s-plane enak
-            double omega0 = 3.0;   // ultrasonic
-            double beta = 1.0;     // rain
-            double tauPh = 5.0;    // pH
+            // ini “model edukasi” biar ada titik dinamis buat s-plane,
+            // ngikut parameter sensor kamu (omega0, beta, tau).
+            double omega0 = 3.0; // dari F0
+            double beta = 1.0;   // dari alpha YL83
+            double tauPh = 5.0;  // dari tau pH
 
             var jsn = sensors.OfType<JSNSR04T>().FirstOrDefault();
             if (jsn != null)
             {
-                // 20k–60k Hz → 2..6 rad/s
-                omega0 = jsn.P.F0 / 10000.0;
+                omega0 = jsn.P.F0 / 10000.0; // 20k..60k -> 2..6 (skala visual)
             }
 
             var yl = sensors.OfType<YL83>().FirstOrDefault();
@@ -784,46 +892,44 @@ namespace floodrisk2
                 tauPh = Math.Max(0.1, ph.P.Tau);
             }
 
-            var poles = new List<Complex>();
-
-            // ultrasonic: s = ±jω0
-            poles.Add(new Complex(0, omega0));
-            poles.Add(new Complex(0, -omega0));
-
-            // rain: s = -β
-            poles.Add(new Complex(-beta, 0));
-
-            // pH: first-order lag, s = -1/τ
-            poles.Add(new Complex(-1.0 / tauPh, 0));
-
-            // flow + temperature integrators: s = 0
-            poles.Add(Complex.Zero);
-            poles.Add(Complex.Zero);
+            var poles = new List<Complex>
+            {
+                new Complex(0,  omega0),
+                new Complex(0, -omega0),
+                new Complex(-beta, 0),
+                new Complex(-1.0 / tauPh, 0),
+                Complex.Zero,
+                Complex.Zero
+            };
 
             return poles;
         }
 
         private List<Complex> GetSystemZeros()
         {
-            var zeros = new List<Complex>();
-
-            // ultrasonic numerator ada faktor s → zero di s=0
-            zeros.Add(Complex.Zero);
-
-            return zeros;
+            // contoh sederhana: ada zero di origin
+            return new List<Complex> { Complex.Zero };
         }
 
-        private void DrawSPolePlot(Chart chart, List<Complex> poles)
+        private void DrawSPoleZeroPlot(Chart chart, List<Complex> poles, List<Complex> zeros)
         {
+            if (chart == null || chart.Series.Count == 0) return;
+
             var area = chart.ChartAreas[0];
             var sPoles = chart.Series["Poles"];
+            var sZeros = chart.Series["Zeros"];
+
             sPoles.Points.Clear();
+            sZeros.Points.Clear();
 
             foreach (var p in poles)
                 sPoles.Points.AddXY(p.Real, p.Imaginary);
 
-            double maxRe = Math.Max(6, poles.Select(p => Math.Abs(p.Real)).DefaultIfEmpty(1).Max() + 1);
-            double maxIm = Math.Max(4, poles.Select(p => Math.Abs(p.Imaginary)).DefaultIfEmpty(1).Max() + 1);
+            foreach (var z in zeros)
+                sZeros.Points.AddXY(z.Real, z.Imaginary);
+
+            double maxRe = Math.Max(6, poles.Concat(zeros).Select(p => Math.Abs(p.Real)).DefaultIfEmpty(1).Max() + 1);
+            double maxIm = Math.Max(4, poles.Concat(zeros).Select(p => Math.Abs(p.Imaginary)).DefaultIfEmpty(1).Max() + 1);
 
             area.AxisX.Minimum = -maxRe;
             area.AxisX.Maximum = maxRe;
@@ -833,6 +939,8 @@ namespace floodrisk2
 
         private void DrawZPoleZeroPlot(Chart chart, List<Complex> zPoles, List<Complex> zZeros)
         {
+            if (chart == null) return;
+
             var area = chart.ChartAreas[0];
             var sPoles = chart.Series["Poles"];
             var sZeros = chart.Series["Zeros"];
@@ -840,8 +948,9 @@ namespace floodrisk2
 
             sPoles.Points.Clear();
             sZeros.Points.Clear();
-            unit.Points.Clear();
 
+            // unit circle refresh
+            unit.Points.Clear();
             int N = 360;
             for (int i = 0; i <= N; i++)
             {

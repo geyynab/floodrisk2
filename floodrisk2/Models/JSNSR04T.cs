@@ -6,76 +6,90 @@ namespace floodrisk2.Models
     {
         public string Name => "JSN-SR04T (Water level)";
 
-        // Sesuai dengan tabel rumus simulasi
+        // Model rapi: output utama = time-of-flight / pulse width
+        // plus sinyal echo (40 kHz) untuk visualisasi/FFT
         public string Formula =>
-            "s(t) = A e^{-αd} cos(2πf0 ( t - 2d/c(T) )) cos^n(θ) + n(t)";
+            "y(t)=t_echo=2d/c(T)+n(t);  s(t)=Aeff cos(2πf0(t-t_echo))·u(t-t_echo)+n(t)";
 
         public class Params
         {
             // Jarak air ke sensor (cm)
-            public double Distance_cm { get; set; } = 100.0;   // d (cm)
+            public double Distance_cm { get; set; } = 100.0;
 
             // Frekuensi ultrasonic (Hz)
-            public double F0 { get; set; } = 40000.0;          // f0 (Hz)
+            public double F0 { get; set; } = 40000.0;
 
-            // Koefisien atenuasi jarak
-            public double Alpha { get; set; } = 0.005;         // α
+            // Koefisien atenuasi jarak (1/m)
+            public double Alpha { get; set; } = 0.005;
 
             // Temperatur lingkungan (°C)
-            public double TempC { get; set; } = 20.0;          // T (°C)
+            public double TempC { get; set; } = 20.0;
 
-            // Amplitudo dasar A (sebelum faktor jarak & sudut)
-            public double Amplitude { get; set; } = 1.0;       // A
+            // Amplitudo dasar
+            public double Amplitude { get; set; } = 1.0;
 
-            // Sudut beam ultrasonic (derajat) untuk faktor cos^n(θ)
-            public double ThetaDeg { get; set; } = 0.0;        // θ (deg)
+            // Sudut beam ultrasonic (derajat)
+            public double ThetaDeg { get; set; } = 0.0;
 
-            // Orde cos^n(θ) → n
-            public double AngleOrder { get; set; } = 1.0;      // n
+            // Orde cos^n(theta)
+            public double AngleOrder { get; set; } = 1.0;
 
-            // Standar deviasi noise n(t)
-            public double NoiseStd { get; set; } = 0.01;       // σ
+            // Noise std
+            public double NoiseStd { get; set; } = 0.01;
+
+            // Durasi paket echo (agar tidak sinus terus-menerus)
+            public double EchoWindowSec { get; set; } = 0.001; // 1 ms
         }
 
         public Params P { get; set; } = new Params();
 
         private readonly Random rnd = new Random();
 
+        // Output utama sensor (time-of-flight / pulse width)
+        public double LastEchoTimeSec { get; private set; } = 0.0;
+
+        // Kecepatan suara sebagai fungsi temperatur (aproksimasi)
+        private static double SpeedOfSound(double tempC) => 331.4 + 0.606 * tempC;
+
         public double[] Generate(double[] t)
         {
             int N = t.Length;
             double[] s = new double[N];
 
-            // d dalam meter, dibatasi 0.2–6 m (range JSN-SR04T praktis)
-            double d_m = Math.Max(0.2, Math.Min(6.0, P.Distance_cm / 100.0));
+            // Range JSN-SR04T: 21 cm – 600 cm
+            double d_m = Math.Max(0.21, Math.Min(6.0, P.Distance_cm / 100.0));
 
-            // Kecepatan suara (m/s) sebagai fungsi temperatur (aproksimasi)
-            double c = 331.4 + 0.606 * P.TempC;
+            double c = SpeedOfSound(P.TempC);
 
-            // Waktu tempuh bolak-balik 2d/c(T)
+            // time-of-flight bolak-balik
             double tEcho = 2.0 * d_m / c;
+            LastEchoTimeSec = tEcho;
 
-            // Faktor atenuasi jarak e^{-α d}
+            // atenuasi jarak
             double distAtt = Math.Exp(-P.Alpha * d_m);
 
-            // Faktor sudut cos^n(θ)
+            // faktor sudut
             double thetaRad = P.ThetaDeg * Math.PI / 180.0;
             double angleFactor = Math.Pow(Math.Cos(thetaRad), P.AngleOrder);
 
-            // Amplitudo efektif: A e^{-αd} cos^n(θ)
+            // amplitudo efektif
             double Aeff = P.Amplitude * distAtt * angleFactor;
+
+            double echoWin = Math.Max(1e-6, P.EchoWindowSec);
 
             for (int i = 0; i < N; i++)
             {
                 double ti = t[i];
 
-                // Komponen utama: echo teredam & ter-delay
-                double echo = Aeff * Math.Cos(2.0 * Math.PI * P.F0 * (ti - tEcho));
+                // gating: echo hanya muncul setelah tEcho, dan selama echoWin
+                double gate = (ti >= tEcho && ti <= tEcho + echoWin) ? 1.0 : 0.0;
 
-                // Noise Gaussian n(t)
+                // echo 40 kHz
+                double echo = gate * Aeff * Math.Cos(2.0 * Math.PI * P.F0 * (ti - tEcho));
+
+                // noise
                 double noise = Gaussian(0.0, P.NoiseStd);
 
-                // Sinyal total
                 s[i] = echo + noise;
             }
 
@@ -84,7 +98,7 @@ namespace floodrisk2.Models
 
         private double Gaussian(double mu, double sigma)
         {
-            // Box-Muller transform
+            // Box-Muller
             double u1 = 1.0 - rnd.NextDouble();
             double u2 = 1.0 - rnd.NextDouble();
             double r = Math.Sqrt(-2.0 * Math.Log(u1));
